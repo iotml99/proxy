@@ -267,7 +267,7 @@ def _fix_scope(scope: str) -> str:
 def _proxy_base_url(req: func.HttpRequest) -> str:
     host = req.headers.get("x-forwarded-host") or req.headers.get("host", "")
     scheme = req.headers.get("x-forwarded-proto", "https")
-    return f"{scheme}://{host}/api/proxy"
+    return f"{scheme}://{host}"
 
 
 def _cors_headers() -> dict:
