@@ -50,10 +50,18 @@ async def main(req: func.HttpRequest) -> func.HttpResponse:
     path = req.route_params.get("path", "")
     method = req.method.upper()
 
-    logger.info(f"Proxy: {method} /{path}")
+    logger.info("=" * 60)
+    logger.info(f"REQUEST  {method} /{path}")
+    logger.info(
+        f"From:    {req.headers.get('x-forwarded-for', req.headers.get('client-ip', 'unknown'))}"
+    )
+    logger.info(f"UA:      {req.headers.get('user-agent', '-')[:120]}")
+    if req.params:
+        logger.info(f"Params:  {dict(req.params)}")
 
     # ── CORS preflight ────────────────────────────────────────────────────────
     if method == "OPTIONS":
+        logger.info("RESPONSE 204 CORS preflight")
         return func.HttpResponse(status_code=204, headers=_cors_headers())
 
     # ── OAuth discovery metadata ──────────────────────────────────────────────
@@ -62,18 +70,30 @@ async def main(req: func.HttpRequest) -> func.HttpResponse:
         ".well-known/oauth-authorization-server",
         ".well-known/openid-configuration",
     ):
-        return _handle_metadata(req, path)
+        logger.info(f"HANDLER  metadata → {path}")
+        resp = _handle_metadata(req, path)
+        logger.info(f"RESPONSE {resp.status_code} {path}")
+        return resp
 
     # ── OAuth authorize (redirect) ────────────────────────────────────────────
     if path == "oauth/authorize":
-        return _handle_authorize(req)
+        logger.info("HANDLER  authorize")
+        resp = _handle_authorize(req)
+        logger.info(f"RESPONSE {resp.status_code} redirect → Entra")
+        return resp
 
     # ── OAuth token exchange ──────────────────────────────────────────────────
     if path == "oauth/token":
-        return await _handle_token(req)
+        logger.info("HANDLER  token exchange")
+        resp = await _handle_token(req)
+        logger.info(f"RESPONSE {resp.status_code} token exchange complete")
+        return resp
 
     # ── Everything else → forward to real MCP backend ────────────────────────
-    return await _forward_to_backend(req, path)
+    logger.info(f"HANDLER  forward → backend /{path}")
+    resp = await _forward_to_backend(req, path)
+    logger.info(f"RESPONSE {resp.status_code} forwarded")
+    return resp
 
 
 # ── OAuth metadata ────────────────────────────────────────────────────────────
@@ -85,6 +105,7 @@ def _handle_metadata(req: func.HttpRequest, path: str) -> func.HttpResponse:
     Claude reads this and sends all auth requests here instead of to Entra directly.
     """
     base = _proxy_base_url(req)
+    logger.info(f"Metadata base URL: {base}")
 
     if path == ".well-known/oauth-protected-resource":
         # MCP Protected Resource Metadata (RFC 9728)
@@ -128,7 +149,12 @@ def _handle_authorize(req: func.HttpRequest) -> func.HttpResponse:
     """
     params = dict(req.params)
 
-    logger.info(f"Authorize params BEFORE fix: {list(params.keys())}")
+    had_resource = "resource" in params
+    logger.info(f"Authorize  keys in: {list(params.keys())}")
+    logger.info(
+        f"Authorize  resource present: {had_resource}  value: {params.get('resource', '-')}"
+    )
+    logger.info(f"Authorize  scope in: {params.get('scope', '-')}")
 
     # THE FIX: remove resource parameter
     params.pop("resource", None)
@@ -136,9 +162,12 @@ def _handle_authorize(req: func.HttpRequest) -> func.HttpResponse:
     # Ensure scope is set correctly
     params["scope"] = _fix_scope(params.get("scope", ""))
 
-    logger.info(f"Authorize params AFTER fix: {params.get('scope')}")
+    logger.info(f"Authorize  scope out: {params.get('scope')}")
+    logger.info(f"Authorize  client_id: {params.get('client_id', '-')}")
+    logger.info(f"Authorize  redirect_uri: {params.get('redirect_uri', '-')}")
 
     redirect = f"{ENTRA_AUTH_URL}?{urllib.parse.urlencode(params)}"
+    logger.info(f"Authorize  → {ENTRA_AUTH_URL}")
     return func.HttpResponse(status_code=302, headers={"Location": redirect})
 
 
@@ -154,7 +183,14 @@ async def _handle_token(req: func.HttpRequest) -> func.HttpResponse:
         body = req.get_body().decode("utf-8")
         params = dict(urllib.parse.parse_qsl(body))
 
-        logger.info(f"Token params BEFORE fix: {list(params.keys())}")
+        had_resource = "resource" in params
+        logger.info(f"Token  keys in: {list(params.keys())}")
+        logger.info(f"Token  grant_type: {params.get('grant_type', '-')}")
+        logger.info(
+            f"Token  resource present: {had_resource}  value: {params.get('resource', '-')}"
+        )
+        logger.info(f"Token  scope in: {params.get('scope', '-')}")
+        logger.info(f"Token  client_id: {params.get('client_id', '-')}")
 
         # THE FIX: remove resource parameter
         params.pop("resource", None)
@@ -162,7 +198,8 @@ async def _handle_token(req: func.HttpRequest) -> func.HttpResponse:
         # Ensure scope is set correctly
         params["scope"] = _fix_scope(params.get("scope", ""))
 
-        logger.info(f"Token params AFTER fix: {params.get('scope')}")
+        logger.info(f"Token  scope out: {params.get('scope')}")
+        logger.info(f"Token  → POST {ENTRA_TOKEN_URL}")
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
@@ -171,7 +208,9 @@ async def _handle_token(req: func.HttpRequest) -> func.HttpResponse:
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
 
-        logger.info(f"Entra token response: {resp.status_code}")
+        logger.info(f"Token  Entra responded: {resp.status_code}")
+        if resp.status_code != 200:
+            logger.warning(f"Token  Entra error body: {resp.text[:500]}")
 
         return func.HttpResponse(
             resp.content,
@@ -210,7 +249,12 @@ async def _forward_to_backend(req: func.HttpRequest, path: str) -> func.HttpResp
             if k.lower() not in ("host", "content-length")
         }
 
-        logger.info(f"Forwarding to backend: {req.method} {target_url}")
+        auth_header = headers.get("authorization", "")
+        logger.info(f"Forward  {req.method} {target_url}")
+        logger.info(
+            f"Forward  auth header present: {bool(auth_header)}  type: {auth_header.split()[0] if auth_header else '-'}"
+        )
+        logger.info(f"Forward  content-type: {headers.get('content-type', '-')}")
 
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.request(
@@ -220,7 +264,9 @@ async def _forward_to_backend(req: func.HttpRequest, path: str) -> func.HttpResp
                 content=req.get_body(),
             )
 
-        logger.info(f"Backend response: {resp.status_code}")
+        logger.info(f"Forward  backend responded: {resp.status_code}")
+        if resp.status_code >= 400:
+            logger.warning(f"Forward  backend error body: {resp.text[:500]}")
 
         # Build response headers, add CORS
         resp_headers = dict(resp.headers)
