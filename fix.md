@@ -1,8 +1,14 @@
-# Claude + Microsoft Fabric Remote MCP - Solution
+# Claude + Microsoft Fabric Remote MCP - Solution Writeup
+
+**Prepared for:** Erik  
+**Date:** March 5, 2026  
+**Subject:** Fixing AADSTS901002 when connecting Claude to the Fabric Remote MCP Server
+
+---
 
 ## Summary
 
-The setup was correct. The app registration, delegated permissions, and Fabric MCP endpoint were all configured properly. The error was caused by a known incompatibility between how Claude's MCP client initiates OAuth and what Microsoft Entra ID v2 accepts. The fix is a lightweight OAuth and MCP proxy deployed as an Azure Function in the tenant.
+Your setup was correct. The app registration, delegated permissions, and Fabric MCP endpoint were all configured properly. The error was caused by a known incompatibility between how Claude's MCP client initiates OAuth and what Microsoft Entra ID v2 accepts. The fix is a lightweight OAuth and MCP proxy deployed as an Azure Function in your tenant.
 
 ---
 
@@ -30,7 +36,7 @@ This issue is publicly documented in multiple GitHub repositories:
 
 ## The Solution: OAuth + MCP Proxy (Azure Function)
 
-An Azure Function deployed in the tenant acts as a transparent proxy between Claude and the Fabric MCP endpoint. Claude points at the proxy instead of Fabric directly. The proxy:
+An Azure Function deployed in your tenant acts as a transparent proxy between Claude and your Fabric MCP endpoint. Claude points at the proxy instead of Fabric directly. The proxy:
 
 1. **Serves its own OAuth discovery metadata** - so Claude sends all auth requests to the proxy, not directly to Entra
 2. **Strips the `resource` parameter** from every OAuth request - the fix
@@ -38,7 +44,7 @@ An Azure Function deployed in the tenant acts as a transparent proxy between Cla
 4. **Forwards the clean request to Entra** - login succeeds, token is issued
 5. **Forwards all MCP tool calls transparently** to `api.fabric.microsoft.com` - Claude queries Fabric normally
 
-All traffic between Claude and Fabric passes through the proxy - both the OAuth handshake and all MCP tool calls. The proxy fixes the OAuth request on the way in and forwards Fabric responses back to Claude unchanged. This means the proxy sits in the full data path, which the team should factor into security review and network design.
+All traffic between Claude and Fabric passes through the proxy - both the OAuth handshake and all MCP tool calls. The proxy fixes the OAuth request on the way in and forwards Fabric responses back to Claude unchanged. This means the proxy sits in the full data path, which your team should factor into security review and network design.
 
 ```
 WITHOUT PROXY (broken):
@@ -53,41 +59,43 @@ Claude -> proxy -> MCP tool calls -> Fabric -> data -> proxy -> Claude
 
 ## Architecture
 
-```mermaid
-sequenceDiagram
-    actor User
-    participant Claude as Claude<br/>(web/desktop)
-    participant Proxy as OAuth + MCP Proxy<br/>(Azure Function)
-    participant Entra as Microsoft Entra ID<br/>(login.microsoftonline.com)
-    participant Fabric as Fabric MCP Backend<br/>(api.fabric.microsoft.com)
-
-    Note over Claude,Fabric: Step 1 - Discovery
-    Claude->>Proxy: GET /.well-known/oauth-protected-resource
-    Proxy-->>Claude: { authorization_servers: [proxy] }
-
-    Claude->>Proxy: GET /.well-known/oauth-authorization-server
-    Proxy-->>Claude: { authorization_endpoint, token_endpoint }
-
-    Note over Claude,Fabric: Step 2 - Authorization (browser redirect)
-    Claude->>Proxy: GET /oauth/authorize?resource=...&scope=...
-    Note right of Proxy: Strip resource param<br/>Fix scope to /.default
-    Proxy->>Entra: GET /authorize?scope=api://.../.default (no resource)
-    Entra-->>User: Login page
-    User-->>Entra: Credentials
-    Entra-->>Claude: Authorization code
-
-    Note over Claude,Fabric: Step 3 - Token exchange
-    Claude->>Proxy: POST /oauth/token (body contains resource=...)
-    Note right of Proxy: Strip resource param<br/>Fix scope to /.default
-    Proxy->>Entra: POST /token (clean request)
-    Entra-->>Proxy: Access token
-    Proxy-->>Claude: Access token
-
-    Note over Claude,Fabric: Step 4 - MCP tool calls
-    Claude->>Proxy: POST / (MCP request + Bearer token)
-    Proxy->>Fabric: POST /v1/mcp/powerbi (forwarded unchanged)
-    Fabric-->>Proxy: MCP response
-    Proxy-->>Claude: MCP response
+```
+  Claude             Proxy (Azure Fn)      Entra ID             Fabric MCP
+  (web/desktop)                            (login.microsoft...)  (api.fabric...)
+      |                    |                    |                    |
+      |  --- Step 1: Discovery ---             |                    |
+      |                    |                    |                    |
+      |--(1) GET /.well-known/oauth-protected-resource------------->|
+      |<-(2) { authorization_servers: [proxy] }                     |
+      |                    |                    |                    |
+      |--(3) GET /.well-known/oauth-authorization-server----------->|
+      |<-(4) { authorization_endpoint, token_endpoint }             |
+      |                    |                    |                    |
+      |  --- Step 2: Authorization (browser redirect) ---           |
+      |                    |                    |                    |
+      |--(5) GET /oauth/authorize?resource=...&scope=...            |
+      |       [proxy strips resource, fixes scope to /.default]     |
+      |       (6) GET /authorize?scope=api://.../.default ---------->|
+      |                    |          (7) Login page                 |
+      |<--------------------------------------------------(8) Login page
+      |--(9) User credentials---------------------------------------->
+      |<--(10) Authorization code------------------------------------
+      |                    |                    |                    |
+      |  --- Step 3: Token Exchange ---        |                    |
+      |                    |                    |                    |
+      |--(11) POST /oauth/token (body: resource=...)                |
+      |        [proxy strips resource, fixes scope to /.default]    |
+      |        (12) POST /token (clean request) ------------------>  |
+      |                    |<--(13) Access token                     |
+      |<--(14) Access token|                    |                    |
+      |                    |                    |                    |
+      |  --- Step 4: MCP Tool Calls ---        |                    |
+      |                    |                    |                    |
+      |--(15) POST / (MCP request + Bearer token)                   |
+      |        (16) POST /v1/mcp/powerbi (forwarded unchanged) ---> |
+      |                    |<--(17) MCP response                    |
+      |<--(18) MCP response|                    |                    |
+      |                    |                    |                    |
 ```
 
 ---
@@ -126,7 +134,7 @@ A Python Azure Function available at the root path `/` that handles:
 **Environment variables required:**
 
 ```
-ENTRA_TENANT_ID  = <tenant-id>
+ENTRA_TENANT_ID  = your-tenant-id
 MCP_BACKEND_URL  = https://api.fabric.microsoft.com/v1/mcp/powerbi
 MCP_RESOURCE     = https://api.fabric.microsoft.com
 ```
@@ -135,7 +143,7 @@ MCP_RESOURCE     = https://api.fabric.microsoft.com
 
 Configured with:
 
-- **Client ID:** registered in the tenant
+- **Client ID:** registered in your tenant
 - **Client Secret:** generated and stored in Claude connector Advanced Settings
 - **Redirect URI:** `https://claude.ai/api/mcp/auth_callback`
 - **API Permissions:** delegated permissions for the MCP server resource
@@ -143,9 +151,9 @@ Configured with:
 
 ### Claude Connector Configuration
 
-- **MCP Server URL:** `https://<proxy>.azurewebsites.net/`
-- **OAuth Client ID:** app registration Client ID
-- **OAuth Client Secret:** app registration Client Secret Value
+- **MCP Server URL:** `https://your-proxy.azurewebsites.net/`
+- **OAuth Client ID:** your app registration Client ID
+- **OAuth Client Secret:** your app registration Client Secret Value
 
 ---
 
@@ -171,25 +179,25 @@ UA: Claude-User
 
 ---
 
-## Deployment Steps
+## Deployment Steps for Your Tenant
 
-1. **Create an Azure Function App** in the Azure subscription (Python 3.12, Flex Consumption plan, Linux)
+1. **Create an Azure Function App** in your Azure subscription (Python 3.12, Flex Consumption plan, Linux)
 2. **Fork or copy the proxy source** into a GitHub repository
-3. **Connect GitHub Actions** - the repo includes a workflow (`.github/workflows/main_proxy.yml`) that builds and deploys automatically on push to `main`; link it to the Function App's publish profile
+3. **Connect GitHub Actions** - the repo includes a workflow (`.github/workflows/main_proxy.yml`) that builds and deploys automatically on push to `main`; link it to your Function App's publish profile
 4. **Set environment variables** in Function App - Configuration - Application Settings:
    - `ENTRA_TENANT_ID`, `MCP_BACKEND_URL`, `MCP_RESOURCE`
-5. **Register an Entra app** (or reuse an existing one) with redirect URI `https://claude.ai/api/mcp/auth_callback` and the Fabric API permissions
-6. **Update the Claude connector** to point at `https://<proxy>.azurewebsites.net/` with Client ID and Secret in Advanced Settings
+5. **Register an Entra app** (or reuse your existing one) with redirect URI `https://claude.ai/api/mcp/auth_callback` and your Fabric API permissions
+6. **Update the Claude connector** to point at `https://your-proxy.azurewebsites.net/` with Client ID and Secret in Advanced Settings
 7. **Test** - click Connect, sign in, ask Claude to list Power BI workspaces
 
 ---
 
 ## Security Notes
 
-- The proxy runs entirely within the Azure tenant under full control
+- The proxy runs entirely within your Azure tenant under your control
 - **All traffic between Claude and Fabric passes through the proxy** - both OAuth and MCP tool calls including query results. This is by design and is what makes the fix possible.
-- The proxy performs no logging of data payloads - only request metadata (method, path, status code) is logged
-- Because data flows through the proxy, we recommend deploying it in the same Azure region as the Fabric resources and restricting inbound access to Claude's known IP ranges
+- The proxy performs no logging of data payloads — only request metadata (method, path, status code) is logged
+- Because data flows through the proxy, we recommend deploying it in the same Azure region as your Fabric resources and restricting inbound access to Claude's known IP ranges
 - Tokens are not logged (only parameter names are logged, never values)
 - The Function App can be locked down with Azure network policies or IP restrictions
 - Flex Consumption plan cost is low - scales to zero when not in use
