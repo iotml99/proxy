@@ -1,0 +1,6 @@
+name: proxy
+services:
+  proxy:
+    project: .
+    host: function
+    language: python
