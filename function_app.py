@@ -1,10 +1,9 @@
 import azure.functions as func
-import logging
+from proxy import main
 
-app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
+app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
 
-@app.route(route="hello", methods=["GET"])
-def hello(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info("Processing hello world request.")
-    return func.HttpResponse("Hello, World!")
+@app.route(route="proxy/{*path}", methods=["GET", "POST", "OPTIONS"])
+async def proxy(req: func.HttpRequest) -> func.HttpResponse:
+    return await main(req)
